@@ -2,6 +2,7 @@
 #include "globals.h"
 #include "espNowHelper.h"
 #include <OtaUpdate.h>
+#include <Preferences.h>
 #define CAN_RX 13
 #define CAN_TX 15
 // Interval:
@@ -10,6 +11,15 @@ static bool driver_installed = false;
 
 // Forward declaration for OTA handler
 extern OtaUpdate otaUpdate;
+
+// WiFi credential reception state (CAN ID 0x01 protocol)
+static bool wifiConfigInProgress = false;
+static uint8_t wifiSsidBuffer[33];       // Max 32 chars + null
+static uint8_t wifiPasswordBuffer[64];   // Max 63 chars + null
+static uint8_t wifiSsidLen = 0;
+static uint8_t wifiPasswordLen = 0;
+static uint8_t wifiSsidReceived = 0;
+static uint8_t wifiPasswordReceived = 0;
 
 namespace canHelper
 {
@@ -68,6 +78,77 @@ namespace canHelper
         driver_installed = true;
     }
 
+    static void saveWifiCredentials(const char* ssid, const char* password) {
+        Preferences prefs;
+        prefs.begin("wifi", false);  // read-write
+        prefs.putString("ssid", ssid);
+        prefs.putString("password", password);
+        prefs.end();
+        debugf("[WiFi] Credentials saved to NVS (SSID: %s)\n", ssid);
+    }
+
+    static void handleWifiConfigMessage(twai_message_t &message) {
+        uint8_t msgType = message.data[0];
+
+        switch (msgType) {
+            case 0x01: {  // Start message
+                wifiSsidLen = message.data[1];
+                wifiPasswordLen = message.data[2];
+                wifiSsidReceived = 0;
+                wifiPasswordReceived = 0;
+                memset(wifiSsidBuffer, 0, sizeof(wifiSsidBuffer));
+                memset(wifiPasswordBuffer, 0, sizeof(wifiPasswordBuffer));
+                wifiConfigInProgress = true;
+                debugf("[WiFi] Config start: SSID len=%d, Password len=%d\n", wifiSsidLen, wifiPasswordLen);
+                break;
+            }
+
+            case 0x02: {  // SSID chunk
+                if (!wifiConfigInProgress) break;
+                uint8_t dataBytes = message.data_length_code - 2;
+                uint8_t remaining = wifiSsidLen - wifiSsidReceived;
+                if (dataBytes > remaining) dataBytes = remaining;
+                if (wifiSsidReceived + dataBytes <= 32) {
+                    memcpy(wifiSsidBuffer + wifiSsidReceived, &message.data[2], dataBytes);
+                    wifiSsidReceived += dataBytes;
+                }
+                break;
+            }
+
+            case 0x03: {  // Password chunk
+                if (!wifiConfigInProgress) break;
+                uint8_t dataBytes = message.data_length_code - 2;
+                uint8_t remaining = wifiPasswordLen - wifiPasswordReceived;
+                if (dataBytes > remaining) dataBytes = remaining;
+                if (wifiPasswordReceived + dataBytes <= 63) {
+                    memcpy(wifiPasswordBuffer + wifiPasswordReceived, &message.data[2], dataBytes);
+                    wifiPasswordReceived += dataBytes;
+                }
+                break;
+            }
+
+            case 0x04: {  // End message with checksum
+                if (!wifiConfigInProgress) break;
+                wifiConfigInProgress = false;
+
+                uint8_t checksum = 0;
+                for (uint8_t i = 0; i < wifiSsidReceived; i++) checksum ^= wifiSsidBuffer[i];
+                for (uint8_t i = 0; i < wifiPasswordReceived; i++) checksum ^= wifiPasswordBuffer[i];
+
+                if (checksum == message.data[1] && wifiSsidReceived == wifiSsidLen && wifiPasswordReceived == wifiPasswordLen) {
+                    wifiSsidBuffer[wifiSsidReceived] = '\0';
+                    wifiPasswordBuffer[wifiPasswordReceived] = '\0';
+                    saveWifiCredentials((const char*)wifiSsidBuffer, (const char*)wifiPasswordBuffer);
+                } else {
+                    debugf("[WiFi] Config failed: checksum %s, SSID %d/%d bytes, Password %d/%d bytes\n",
+                           (checksum == message.data[1]) ? "OK" : "MISMATCH",
+                           wifiSsidReceived, wifiSsidLen, wifiPasswordReceived, wifiPasswordLen);
+                }
+                break;
+            }
+        }
+    }
+
     static void handle_rx_message(twai_message_t &message)
     {
         // Print message details
@@ -98,13 +179,31 @@ namespace canHelper
 
             // Check if this OTA trigger is for this device
             if (currentHostName.equals(targetHostName)) {
-                debugln("[OTA] ✓ Hostname matched - entering OTA mode");
-                otaUpdate.waitForOta();
-                debugln("[OTA] OTA mode exited - resuming normal operation");
+                debugln("[OTA] ✓ Hostname matched - reading WiFi credentials from NVS");
+                Preferences prefs;
+                prefs.begin("wifi", true);  // read-only
+                String ssid = prefs.getString("ssid", "");
+                String password = prefs.getString("password", "");
+                prefs.end();
+
+                if (ssid.length() > 0 && password.length() > 0) {
+                    debugf("[OTA] Using stored WiFi credentials (SSID: %s)\n", ssid.c_str());
+                    OtaUpdate ota(180000, ssid.c_str(), password.c_str());
+                    ota.waitForOta();
+                    debugln("[OTA] OTA mode exited - resuming normal operation");
+                } else {
+                    debugln("[OTA] ERROR: No WiFi credentials in NVS - cannot start OTA");
+                }
             } else {
                 debugln("[OTA] ✗ Hostname mismatch - ignoring OTA trigger");
             }
             return;  // Don't forward OTA trigger messages via ESP-NOW
+        }
+
+        // WiFi credential configuration message (ID 0x01)
+        if (message.identifier == 0x01) {
+            handleWifiConfigMessage(message);
+            return;  // Don't forward WiFi config messages via ESP-NOW
         }
 
         // Forward regular CAN messages via ESP-NOW

@@ -2,10 +2,11 @@
 #include "canHelper.h"
 #include "espNowHelper.h"
 #include <OtaUpdate.h>
-#include "secrets.h"
+#include <Preferences.h>
 
 // Create OTA update handler (3-minute timeout, 180000 ms)
-OtaUpdate otaUpdate(180000, ssid, password);
+// Credentials are loaded from NVS when OTA is triggered; empty here for getHostName() only
+OtaUpdate otaUpdate(180000, "", "");
 
 void setup()
 {
@@ -23,7 +24,6 @@ void setup()
   String hostname = otaUpdate.getHostName();
 
   debugf("[OTA] Device hostname: %s\n", hostname.c_str());
-  debugf("[OTA] WiFi SSID: %s\n", ssid);
   debugln("[OTA] Ready to receive OTA trigger (CAN ID 0x0)");
   debugln("[OTA] OTA trigger format: CAN ID=0x0, Data[0:2]=MAC bytes matching device hostname");
 
