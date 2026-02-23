@@ -1,6 +1,6 @@
 # TrailCurrent CAN to ESP-NOW Gateway
 
-A wireless relay gateway that bridges CAN bus messages to ESP-NOW protocol for remote vehicle monitoring in tow vehicles.
+A wireless relay gateway that bridges CAN bus messages to ESP-NOW protocol for remote vehicle monitoring in tow vehicles. Part of the [TrailCurrent](https://trailcurrent.com) open-source vehicle platform.
 
 ## Overview
 
